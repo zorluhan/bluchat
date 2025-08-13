@@ -9,15 +9,20 @@ final class MeshSession: NSObject, ObservableObject {
     @Published var nearbyHandles: [String] = []
     @Published var nearbyCount: Int = 0
 
+    // Chat context
+    @Published var currentRoom: String = "bitchat"
+    @Published var currentDM: String? = nil  // handle when DM is active
+
     private let serviceType = "bluchat"
     private var myPeerID: MCPeerID
     private var session: MCSession
     private var advertiser: MCNearbyServiceAdvertiser
     private var browser: MCNearbyServiceBrowser
 
-    // Dedup by message id
+    // Discovery and routing
     private var seen: Set<String> = []
     private var discovered: Set<MCPeerID> = []
+    private var handleToPeer: [String: MCPeerID] = [:]
 
     override init() {
         let name = UserDefaults.standard.string(forKey: "nickname") ?? MeshSession.generateNickname()
@@ -44,6 +49,8 @@ final class MeshSession: NSObject, ObservableObject {
     }
 
     func start(room: String) {
+        currentRoom = room
+        currentDM = nil
         advertiser.startAdvertisingPeer()
         browser.startBrowsingForPeers()
         post(system: "you joined #\(room)")
@@ -55,11 +62,39 @@ final class MeshSession: NSObject, ObservableObject {
         session.disconnect()
     }
 
-    func send(text: String, room: String) {
-        let msg = WireMessage.make(sender: nickname, text: text, room: room)
+    func setRoom(_ room: String) {
+        let cleaned = room.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+        currentDM = nil
+        currentRoom = cleaned
+        post(system: "switched to #\(cleaned)")
+    }
+
+    func startDirectChat(with handle: String) {
+        currentDM = handle
+        post(system: "direct chat with \(handle)")
+    }
+
+    func exitDirectChat() {
+        if currentDM != nil {
+            currentDM = nil
+            post(system: "back to #\(currentRoom)")
+        }
+    }
+
+    func send(text: String, room: String? = nil) {
+        let targetRoom = room ?? currentRoom
+        let sender = nickname
+        let msg = WireMessage.make(sender: sender, text: text, room: currentDM ?? "#" + targetRoom)
         guard let data = try? JSONEncoder().encode(msg) else { return }
-        // Send to all connected peers
-        try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
+
+        if let dmHandle = currentDM, let peer = handleToPeer[dmHandle] {
+            // 1:1: send only to target peer
+            try? session.send(data, toPeers: [peer], with: .reliable)
+        } else {
+            // Broadcast to all peers
+            try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
+        }
         relayLocally(msg)
     }
 
@@ -67,9 +102,7 @@ final class MeshSession: NSObject, ObservableObject {
         var newName = newNameRaw.trimmingCharacters(in: .whitespacesAndNewlines)
         if !newName.hasPrefix("@") { newName = "@" + newName }
         guard newName != nickname else { return }
-        // Stop old
         stop()
-        // Reconfigure peer/session with new ID
         nickname = newName
         UserDefaults.standard.set(newName, forKey: "nickname")
         myPeerID = MCPeerID(displayName: newName)
@@ -77,10 +110,9 @@ final class MeshSession: NSObject, ObservableObject {
         advertiser = MCNearbyServiceAdvertiser(peer: myPeerID, discoveryInfo: nil, serviceType: serviceType)
         browser = MCNearbyServiceBrowser(peer: myPeerID, serviceType: serviceType)
         attachDelegates()
-        // Clear discovery cache to refresh counts
         discovered.removeAll()
+        handleToPeer.removeAll()
         refreshNearby()
-        // Restart
         advertiser.startAdvertisingPeer()
         browser.startBrowsingForPeers()
         post(system: "you are now \(newName)")
@@ -108,10 +140,10 @@ final class MeshSession: NSObject, ObservableObject {
 
 extension MeshSession: MCSessionDelegate {
     func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
-        // Keep discovery list roughly in sync
         switch state {
         case .notConnected:
             discovered.remove(peerID)
+            handleToPeer[peerID.displayName] = nil
             refreshNearby()
         default:
             break
@@ -119,9 +151,7 @@ extension MeshSession: MCSessionDelegate {
     }
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
         guard let wire = try? JSONDecoder().decode(WireMessage.self, from: data) else { return }
-        // Dedup + display
         relayLocally(wire)
-        // Relay further to other peers
         let others = session.connectedPeers.filter { $0 != peerID }
         if !others.isEmpty { try? session.send(data, toPeers: others, with: .reliable) }
     }
@@ -138,12 +168,14 @@ extension MeshSession: MCNearbyServiceAdvertiserDelegate, MCNearbyServiceBrowser
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String : String]?) {
         if peerID != myPeerID {
             discovered.insert(peerID)
+            handleToPeer[peerID.displayName] = peerID
             refreshNearby()
             browser.invitePeer(peerID, to: session, withContext: nil, timeout: 10)
         }
     }
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
         discovered.remove(peerID)
+        handleToPeer[peerID.displayName] = nil
         refreshNearby()
     }
 }
@@ -170,7 +202,7 @@ struct WireMessage: Codable {
     let id: String
     let ts: TimeInterval
     let sender: String
-    let room: String
+    let room: String  // "#room" for rooms, or "@handle" for DMs (we store it as sent)
     let text: String
 
     static func make(sender: String, text: String, room: String) -> WireMessage {

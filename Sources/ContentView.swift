@@ -2,7 +2,6 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var mesh: MeshSession
-    @State private var currentRoom: String = "bitchat"
     @State private var input: String = ""
     @State private var showNetwork: Bool = false
     @State private var editingHandle: Bool = false
@@ -15,42 +14,13 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: showNetwork)
         .background(Color.black.edgesIgnoringSafeArea(.all))
         .preferredColorScheme(.dark)
-        .onAppear { mesh.start(room: currentRoom) }
+        .onAppear { mesh.start(room: mesh.currentRoom) }
     }
 
     var mainChat: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("\(currentRoom)")
-                    .font(.system(.headline, design: .monospaced))
-                    .foregroundColor(.green)
-                Spacer()
-                if editingHandle {
-                    TextField("@handle", text: $mesh.nickname, onCommit: {
-                        mesh.updateNickname(mesh.nickname)
-                        editingHandle = false
-                    })
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 180)
-                } else {
-                    Text("\(mesh.nickname)")
-                        .font(.system(.subheadline, design: .monospaced))
-                        .foregroundColor(.green)
-                        .onTapGesture { editingHandle = true }
-                }
-                Button(action: { showNetwork.toggle() }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "person.2.fill")
-                        Text("\(mesh.nearbyCount)")
-                    }
-                    .foregroundColor(mesh.nearbyCount > 0 ? .green : .red)
-                }
-            }
-            .padding(.horizontal)
-            .padding(.top, 8)
-
+            header
             Divider().background(Color.green.opacity(0.5))
-
             ScrollViewReader { proxy in
                 ScrollView { messagesList }
                     .onChange(of: mesh.messages.count) { _ in
@@ -59,9 +29,49 @@ struct ContentView: View {
                         }
                     }
             }
-
             inputBar
         }
+    }
+
+    var header: some View {
+        HStack {
+            HStack(spacing: 6) {
+                if let dm = mesh.currentDM {
+                    Button("←") { mesh.exitDirectChat() }
+                        .foregroundColor(.green)
+                    Text(dm)
+                        .font(.system(.headline, design: .monospaced))
+                        .foregroundColor(.green)
+                } else {
+                    Text(mesh.currentRoom)
+                        .font(.system(.headline, design: .monospaced))
+                        .foregroundColor(.green)
+                }
+            }
+            Spacer()
+            if editingHandle {
+                TextField("@handle", text: $mesh.nickname, onCommit: {
+                    mesh.updateNickname(mesh.nickname)
+                    editingHandle = false
+                })
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 180)
+            } else {
+                Text("\(mesh.nickname)")
+                    .font(.system(.subheadline, design: .monospaced))
+                    .foregroundColor(.green)
+                    .onTapGesture { editingHandle = true }
+            }
+            Button(action: { showNetwork.toggle() }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "person.2.fill")
+                    Text("\(mesh.nearbyCount)")
+                }
+                .foregroundColor(mesh.nearbyCount > 0 ? .green : .red)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.top, 8)
     }
 
     var messagesList: some View {
@@ -76,7 +86,7 @@ struct ContentView: View {
 
     var inputBar: some View {
         HStack(spacing: 8) {
-            TextField("type a message…", text: $input)
+            TextField("type a message… (/room #name to switch)", text: $input)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(send)
             Button(action: send) {
@@ -106,7 +116,7 @@ struct ContentView: View {
             } else {
                 ForEach(mesh.nearbyHandles, id: \.self) { handle in
                     Button(handle) {
-                        // For MVP tapping a handle just closes panel; chat is broadcast in the room
+                        mesh.startDirectChat(with: handle)
                         showNetwork = false
                     }
                     .foregroundColor(.green)
@@ -124,7 +134,12 @@ struct ContentView: View {
     func send() {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        mesh.send(text: text, room: currentRoom)
+        if text.hasPrefix("/room ") {
+            let name = String(text.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+            if name.hasPrefix("#") { mesh.setRoom(String(name.dropFirst())) } else { mesh.setRoom(name) }
+        } else {
+            mesh.send(text: text)
+        }
         input = ""
     }
 }
