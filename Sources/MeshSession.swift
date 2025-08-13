@@ -56,6 +56,11 @@ final class MeshSession: NSObject, ObservableObject {
         relayLocally(msg)
     }
 
+    private func post(system text: String) {
+        let wire = WireMessage(id: UUID().uuidString, ts: Date().timeIntervalSince1970, sender: "system", room: "system", text: text)
+        relayLocally(wire)
+    }
+
     private func relayLocally(_ wire: WireMessage) {
         guard seen.insert(wire.id).inserted else { return }
         DispatchQueue.main.async {
