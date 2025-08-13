@@ -1,4 +1,4 @@
-name: Bluchat
+name: Zchat
 options:
   bundleIdPrefix: com.example
   deploymentTarget:
@@ -10,7 +10,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
 packages: {}
 targets:
-  Bluchat:
+  Zchat:
     type: application
     platform: iOS
     deploymentTarget: 16.0
@@ -28,5 +28,5 @@ targets:
         UILaunchScreen: {}
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.example.bluchat
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.zchat
         INFOPLIST_FILE: Info.plist
