@@ -6,15 +6,18 @@ import os.log
 final class MeshSession: NSObject, ObservableObject {
     @Published var messages: [ChatMessage] = []
     @Published var nickname: String
+    @Published var nearbyHandles: [String] = []
+    @Published var nearbyCount: Int = 0
 
     private let serviceType = "bluchat"
-    private let myPeerID: MCPeerID
-    private let session: MCSession
-    private let advertiser: MCNearbyServiceAdvertiser
-    private let browser: MCNearbyServiceBrowser
+    private var myPeerID: MCPeerID
+    private var session: MCSession
+    private var advertiser: MCNearbyServiceAdvertiser
+    private var browser: MCNearbyServiceBrowser
 
     // Dedup by message id
     private var seen: Set<String> = []
+    private var discovered: Set<MCPeerID> = []
 
     override init() {
         let name = UserDefaults.standard.string(forKey: "nickname") ?? MeshSession.generateNickname()
@@ -25,6 +28,10 @@ final class MeshSession: NSObject, ObservableObject {
         advertiser = MCNearbyServiceAdvertiser(peer: myPeerID, discoveryInfo: nil, serviceType: serviceType)
         browser = MCNearbyServiceBrowser(peer: myPeerID, serviceType: serviceType)
         super.init()
+        attachDelegates()
+    }
+
+    private func attachDelegates() {
         session.delegate = self
         advertiser.delegate = self
         browser.delegate = self
@@ -56,6 +63,29 @@ final class MeshSession: NSObject, ObservableObject {
         relayLocally(msg)
     }
 
+    func updateNickname(_ newNameRaw: String) {
+        var newName = newNameRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !newName.hasPrefix("@") { newName = "@" + newName }
+        guard newName != nickname else { return }
+        // Stop old
+        stop()
+        // Reconfigure peer/session with new ID
+        nickname = newName
+        UserDefaults.standard.set(newName, forKey: "nickname")
+        myPeerID = MCPeerID(displayName: newName)
+        session = MCSession(peer: myPeerID, securityIdentity: nil, encryptionPreference: .required)
+        advertiser = MCNearbyServiceAdvertiser(peer: myPeerID, discoveryInfo: nil, serviceType: serviceType)
+        browser = MCNearbyServiceBrowser(peer: myPeerID, serviceType: serviceType)
+        attachDelegates()
+        // Clear discovery cache to refresh counts
+        discovered.removeAll()
+        refreshNearby()
+        // Restart
+        advertiser.startAdvertisingPeer()
+        browser.startBrowsingForPeers()
+        post(system: "you are now \(newName)")
+    }
+
     private func post(system text: String) {
         let wire = WireMessage(id: UUID().uuidString, ts: Date().timeIntervalSince1970, sender: "system", room: "system", text: text)
         relayLocally(wire)
@@ -67,10 +97,26 @@ final class MeshSession: NSObject, ObservableObject {
             self.messages.append(ChatMessage.from(wire))
         }
     }
+
+    private func refreshNearby() {
+        DispatchQueue.main.async {
+            self.nearbyHandles = self.discovered.map { $0.displayName }.sorted()
+            self.nearbyCount = self.nearbyHandles.count
+        }
+    }
 }
 
 extension MeshSession: MCSessionDelegate {
-    func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {}
+    func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
+        // Keep discovery list roughly in sync
+        switch state {
+        case .notConnected:
+            discovered.remove(peerID)
+            refreshNearby()
+        default:
+            break
+        }
+    }
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
         guard let wire = try? JSONDecoder().decode(WireMessage.self, from: data) else { return }
         // Dedup + display
@@ -90,9 +136,16 @@ extension MeshSession: MCNearbyServiceAdvertiserDelegate, MCNearbyServiceBrowser
     }
     func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {}
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String : String]?) {
-        browser.invitePeer(peerID, to: session, withContext: nil, timeout: 10)
+        if peerID != myPeerID {
+            discovered.insert(peerID)
+            refreshNearby()
+            browser.invitePeer(peerID, to: session, withContext: nil, timeout: 10)
+        }
     }
-    func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {}
+    func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
+        discovered.remove(peerID)
+        refreshNearby()
+    }
 }
 
 // MARK: Models
